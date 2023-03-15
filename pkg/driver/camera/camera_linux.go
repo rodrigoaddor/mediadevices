@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/blackjack/webcam"
 	"github.com/pion/mediadevices/pkg/driver"
@@ -70,10 +71,17 @@ type camera struct {
 	started         bool
 	mutex           sync.Mutex
 	cancel          func()
+	prevFrameTime   time.Time
 }
 
 func init() {
+	Initialize()
+}
+
+// Initialize finds and registers camera devices. This is part of an experimental API.
+func Initialize() {
 	discovered := make(map[string]struct{})
+	discover(discovered, "/dev/v4l/by-id/*")
 	discover(discovered, "/dev/v4l/by-path/*")
 	discover(discovered, "/dev/video*")
 }
@@ -153,8 +161,13 @@ func (c *camera) Open() error {
 		return err
 	}
 
-	// Late frames should be discarded. Buffering should be handled in higher level.
-	cam.SetBufferCount(1)
+	// Buffering should be handled in higher level.
+	err = cam.SetBufferCount(1)
+	if err != nil {
+		return err
+	}
+
+	c.prevFrameTime = time.Now()
 	c.cam = cam
 	return nil
 }
@@ -223,6 +236,13 @@ func (c *camera) VideoRecord(p prop.Media) (video.Reader, error) {
 				return nil, func() {}, io.EOF
 			}
 
+			if p.DiscardFramesOlderThan != 0 {
+				if time.Now().Sub(c.prevFrameTime) >= p.DiscardFramesOlderThan {
+					_ = cam.WaitForFrame(readTimeoutSec)
+					_, _ = cam.ReadFrame()
+				}
+			}
+
 			err := cam.WaitForFrame(readTimeoutSec)
 			switch err.(type) {
 			case nil:
@@ -237,6 +257,10 @@ func (c *camera) VideoRecord(p prop.Media) (video.Reader, error) {
 			if err != nil {
 				// Camera has been stopped.
 				return nil, func() {}, err
+			}
+
+			if p.DiscardFramesOlderThan != 0 {
+				c.prevFrameTime = time.Now()
 			}
 
 			// Frame is empty.
